@@ -5,9 +5,25 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include "global.hpp"
+#include "cppjieba/limonp/Md5.hpp"
 #include <string.h>
 namespace yrssf{
 ///////////////////////////////////////////
+inline int lua_isptr(lua_State * L,int p){
+  return (lua_isuserdata(L,p));
+}
+inline void * lua_toptr(lua_State * L,int p){
+  if(lua_isuserdata(L,p)){
+    auto pt=(void **)lua_touserdata(L,p);
+    return *pt;
+  }else{
+    return NULL;
+  }
+}
+inline void lua_pushptr(lua_State * L,void * ptr){
+  auto pt=(void **)lua_newuserdata(L,sizeof(void*));
+  *pt=ptr;
+}
 namespace math{
   double invsqrt(double x){
     double xhalf=0.5f*x;
@@ -280,11 +296,10 @@ template<typename T> class vec3{
       z=zt;
     }
     virtual bool operator==(vec3<T> &i){
-      if(x==i.x)
-      if(x==i.y)
-      if(x==i.z)
+      if(x!=i.x)return false;
+      if(y!=i.y)return false;
+      if(z!=i.z)return false;
       return true;
-      return false;
     }
     virtual void operator()(T xt,T yt,T zt){
       init(xt,yt,zt);
@@ -510,6 +525,96 @@ int lua_geohash_decode(lua_State * L){
   lua_pushnumber(L,position.z);
   return 3;
 }
+
+unsigned char hexchars[] = "0123456789ABCDEF";
+
+int htoi(char *s){
+    int value;
+    int c;
+
+    c = ((unsigned char *)s)[0];
+    if (isupper(c))
+        c = tolower(c);
+    value = (c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10) * 16;
+
+    c = ((unsigned char *)s)[1];
+    if (isupper(c))
+        c = tolower(c);
+    value += c >= '0' && c <= '9' ? c - '0' : c - 'a' + 10;
+
+    return (value);
+}
+
+
+char * url_encode(char const *s, int len, int *new_length){
+    register unsigned char c;
+    unsigned char *to, *start;
+    unsigned char const *from, *end;
+    
+    from = (unsigned char *)s;
+    end  = (unsigned char *)s + len;
+    start = to = (unsigned char *) calloc(1, 3*len+1);
+
+    while (from < end){
+        c = *from++;
+
+        if (c == ' '){
+            *to++ = '+';
+        }else if ((c < '0' && c != '-' && c != '.') ||
+                 (c < 'A' && c > '9') ||
+                 (c > 'Z' && c < 'a' && c != '_') ||
+                 (c > 'z')){
+            to[0] = '%';
+            to[1] = hexchars[c >> 4];
+            to[2] = hexchars[c & 15];
+            to += 3;
+        }else{
+            *to++ = c;
+        }
+    }
+    *to = 0;
+    if (new_length){
+        *new_length = to - start;
+    }
+    return (char *) start;
+}
+
+//匹配前缀
+//s1:前缀
+//s2:字符串
+bool prefix_match(const char * s1,const char * s2){
+      const char * sp=s1;
+      const char * p2=s2;
+      while(*sp){
+       if((*sp)!=(*p2))return 0;
+       sp++;
+       p2++;
+      }
+      return 1;
+}
+
+int url_decode(char *str, int len){
+    char *dest = str;
+    char *data = str;
+
+    while (len--){
+        if (*data == '+'){
+            *dest = ' ';
+        }
+        else if (*data == '%' && len >= 2 && isxdigit((int) *(data + 1)) && isxdigit((int) *(data + 2))){
+            *dest = (char) htoi(data + 1);
+            data += 2;
+            len -= 2;
+        }else{
+            *dest = *data;
+        }
+        data++;
+        dest++;
+    }
+    *dest = '\0';
+    return dest - str;
+}
+
 int luaopen_ysfunc(lua_State * L){
   luaL_Reg hashreg[]={
     {"RSHash",lua_RSHash},
@@ -523,6 +628,15 @@ int luaopen_ysfunc(lua_State * L){
     {"BPHash",lua_BPHash},
     {"FNVHash",lua_FNVHash},
     {"APHash",lua_APHash},
+    {"md5",[](lua_State * L){
+        if(!lua_isstring(L,1))return 0;
+        const char * str=lua_tostring(L,1);
+        std::string res;
+        limonp::md5String(str,res);
+        lua_pushstring(L,res.c_str());
+        return 1;
+      }
+    },
     {"GeohashEncode",lua_geohash_encode},
     {"GeohashDecode",lua_geohash_decode},
     {NULL,NULL}

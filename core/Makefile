@@ -5,6 +5,7 @@ all:../build/YRSSF
     client.hpp.gch        \
     crypt.hpp.gch         \
     daemon.hpp.gch        \
+    luapool.hpp.gch       \
     global.hpp.gch        \
     func.hpp.gch          \
     live.hpp.gch          \
@@ -22,14 +23,16 @@ all:../build/YRSSF
     languagesolver.hpp.gch\
     cache.hpp.gch         \
     threadpool.hpp.gch    \
+    httpd.hpp.gch         \
+    sta.hpp.gch           \
+    websocket.hpp.gch     \
     main.cpp              \
     sqlite/sqlite3.o      \
     ./zlib/libz.a         \
     ./aes/aes.o           \
     ./lua/src/liblua.a    \
     ./leveldb/out-static/libleveldb.a \
-    lua-cjson/lua_cjson.o             \
-    ./lwan/build/common/liblwan.a
+    lua-cjson/lua_cjson.o             
 	
 ../build/YRSSF : .dep
 	g++ main.cpp                       \
@@ -37,7 +40,6 @@ all:../build/YRSSF
 	 ./leveldb/out-static/libleveldb.a \
 	 ./leveldb/out-static/libmemenv.a  \
 	 ./lua/src/liblua.a                \
-	 ./lwan/build/common/liblwan.a     \
 	 ./zlib/libz.a                     \
 	 ./aes/aes.o                       \
 	 ./lua-cjson/lua_cjson.o           \
@@ -47,7 +49,6 @@ all:../build/YRSSF
 	 -ldl                              \
 	 -DWEB1                            \
 	 -I ./lua/src                      \
-	 -I ./lwan/common                  \
 	 -I ./leveldb/include              \
 	 -I ./zlib                         \
 	 -I ./aes                          \
@@ -58,11 +59,10 @@ all:../build/YRSSF
 	 -lcrypto                          \
 	 -o ../build/YRSSF
 android : .dep
-	g++ -static main.cpp               \
+	g++ main.cpp -static               \
 	 -pthread                          \
 	 ./leveldb/out-static/libleveldb.a \
 	 ./leveldb/out-static/libmemenv.a  \
-	 ./lwan/build/common/liblwan.a     \
 	 ./lua/src/liblua.a                \
 	 ./zlib/libz.a                     \
 	 ./aes/aes.o                       \
@@ -71,24 +71,19 @@ android : .dep
 	 ./lua-cjson/fpconv.o              \
 	 ./sqlite/sqlite3.o                \
 	 -Wl,-Bdynamic,-ldl                \
-	 -DWEB2                            \
+	 -DWEB1                            \
 	 -I ./lua/src                      \
 	 -I ./leveldb/include              \
-	 -I ./lwan/common                  \
 	 -I ./zlib                         \
 	 -I ./aes                          \
 	 -I ./                             \
 	 -std=c++0x                        \
-	 -Wl,-Bstatic,-ljpeg               \
-	 -Wl,-Bstatic,-lssl                \
-	 -Wl,-Bstatic,-lcrypto             \
-	 -Wl,-Bstatic,-lgcc                \
+	 -ljpeg                            \
+	 -lssl                             \
+	 -lcrypto                          \
 	 -o ../build/YRSSF
 ./zlib/libz.a :
 	cd zlib       && make
-./lwan/build/common/liblwan.a:
-	-mkdir core/lwan/build
-	cd core/lwan/build && cmake ../   && make	
 ./leveldb/out-static/libleveldb.a :
 	cd leveldb    && make
 ./aes/aes.o :
@@ -105,8 +100,6 @@ rwmutex.hpp.gch : rwmutex.hpp
 	g++ rwmutex.hpp
 base64.hpp.gch : base64.hpp
 	g++ base64.hpp
-lwan-build-config.h.gch : lwan-build-config.h
-	g++ lwan-build-config.h
 cache.hpp.gch : cache.hpp
 	g++ cache.hpp -std=c++0x
 classes.hpp.gch : classes.hpp
@@ -132,8 +125,8 @@ server-base.hpp.gch : server-base.hpp
 server.hpp.gch : server.hpp
 	g++ server.hpp -I ./leveldb/include -std=c++0x
 webserver.hpp.gch : webserver.hpp
-	g++ webserver.hpp -I ./lwan/common -I ./leveldb/include -std=c++0x
-ysconnection.hpp.gch : ysconnection.hpp
+	g++ webserver.hpp -I ./leveldb/include -std=c++0x
+ysconnection.hpp.gch : ysconnection.hpp filecache.hpp.gch
 	g++ ysconnection.hpp -I ./leveldb/include -std=c++0x
 ysdb.hpp.gch : ysdb.hpp
 	g++ ysdb.hpp -I ./leveldb/include -std=c++0x
@@ -143,6 +136,29 @@ languagesolver.hpp.gch : languagesolver.hpp
 	g++ languagesolver.hpp -std=c++0x
 threadpool.hpp.gch : threadpool.hpp
 	g++ threadpool.hpp -std=c++0x
+httpd.hpp.gch : \
+    httpd.hpp \
+    httpdpaser.hpp.gch \
+    httpdfastcgi.hpp.gch \
+    httpdmime.hpp.gch \
+    httpdtemplate.hpp.gch
+	g++ httpd.hpp -std=c++0x -I ./zlib
+httpdpaser.hpp.gch : httpdpaser.hpp
+	g++ httpdpaser.hpp -std=c++0x
+httpdfastcgi.hpp.gch : httpdfastcgi.hpp
+	g++ httpdfastcgi.hpp -std=c++0x
+httpdmime.hpp.gch : httpdmime.hpp
+	g++ httpdmime.hpp -std=c++0x
+filecache.hpp.gch : filecache.hpp
+	g++ filecache.hpp -std=c++0x
+httpdtemplate.hpp.gch : httpdtemplate.hpp
+	g++ httpdtemplate.hpp -std=c++0x
+luapool.hpp.gch : luapool.hpp
+	g++ luapool.hpp -std=c++0x
+sta.hpp.gch : sta.hpp
+	g++ sta.hpp -std=c++0x
+websocket.hpp.gch : websocket.hpp
+	g++ websocket.hpp -std=c++0x
 clean:
 	-rm *.gch
 	-rm ../build/YRSSF
@@ -152,4 +168,4 @@ clean:
 	cd lua       && make clean
 	cd lua-cjson && make clean
 	cd leveldb   && make clean
-	-rm -rf lwan/build
+	

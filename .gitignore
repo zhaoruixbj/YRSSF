@@ -13,11 +13,14 @@
 *.gch
 *.pyc
 *.db
+*debug
 YRSSF
 /core/lwan/build/*
 /core/leveldb/out-shared/*
 /core/leveldb/out-static/*
 /build/data/*/*
+/build/data/cert.txt
+/build/dict*
 /build/live/*
 /build/live-client
 /build/launcher
@@ -25,3 +28,6 @@ YRSSF
 /build/lock
 /build/install.lock
 /test/*
+/Android/yrssf_bin/*
+/atulocher*
+/testbuild*

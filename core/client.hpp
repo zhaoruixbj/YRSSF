@@ -1,11 +1,12 @@
 #ifndef yrssf_core_client
 #define yrssf_core_client
 #include "server.hpp"
+#include "global.hpp"
+#include "func.hpp"
 namespace yrssf{
 class Client:public Server{
   public:
   bool liveclientrunning;
-  char parpbk[ECDH_SIZE];
   Client(short p):Server(p){
     globalmode='f';
     iscrypt=0;
@@ -39,44 +40,37 @@ class Client:public Server{
     }
     return 0;
   }
-  bool getPbk(){
-    netSource qypk;
-    netSource buf;
-    int i;
-    in_addr  from;
-    short    port;
-    bzero(&qypk,sizeof(qypk));
-    qypk.header.mode=_GET_PUBLIC_KEY;
+  void liveBegin(){
+    netQuery  qypk;
+    
+    qypk.header.mode=_LIVE_B;
     qypk.header.userid=myuserid;
+    
     int rdn=randnum();
     qypk.header.unique=rdn;
+    
     wristr(mypassword,qypk.header.password);
+    
     if(iscrypt)crypt_encode(&qypk,&key);
-    for(i=0;i<10;i++){
+    
+    for(int i=0;i<8;i++)
       send(parIP,parPort,&qypk,sizeof(qypk));
-      dsloop1:
-      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
-        if(from.s_addr==parIP.s_addr && port==parPort){
-          crypt_decode(&buf,&key);
-          
-          if(rdn!=qypk.header.unique) goto dsloop1;
-          
-          if(buf.header.mode==_GET_PUBLIC_KEY){
-            memcpy(
-              parpbk,
-              buf.source,
-              ECDH_SIZE
-            );
-            return 1;
-          }else{
-            return 0;
-          }
-        }
-        else
-          goto dsloop1;
-      }
-    }
-    return 0;
+  }
+  void liveEnd(){
+    netQuery  qypk;
+    
+    qypk.header.mode=_LIVE_E;
+    qypk.header.userid=myuserid;
+    
+    int rdn=randnum();
+    qypk.header.unique=rdn;
+    
+    wristr(mypassword,qypk.header.password);
+    
+    if(iscrypt)crypt_encode(&qypk,&key);
+    
+    for(int i=0;i<8;i++)
+      send(parIP,parPort,&qypk,sizeof(qypk));
   }
   bool getUniKey(){
     netQuery qypk;
@@ -119,6 +113,14 @@ class Client:public Server{
     return 0;
   }
   bool reg(const netReg * k){
+    //认证。
+    //用于服务器没有登记客户端帐号的情况下
+    //由受信任的服务器开证明
+    //强行创建帐号
+    //
+    //先用getUniKey开证明
+    //然后连接到服务器
+    //再调用此方法
     netSource respk;
     netQuery  qypk;
     
@@ -132,14 +134,14 @@ class Client:public Server{
     qypk.header.userid=myuserid;
     int rdn=randnum();
     qypk.header.unique=rdn;
-    wristr(mypassword,qypk.header.password);
-    
+    //wristr(mypassword,qypk.header.password);
+    //认证，密码在证书里面
     if(!getPbk())return 0;
     
     auto tR=(netReg*)respk.source;
     memcpy(tR->key,parpbk,ECDH_SIZE);
     tR->encrypt();
-    
+    //对数据进行非对称加密
     if(iscrypt)crypt_encode(&qypk,&key);
     for(i=0;i<10;i++){
       send(parIP,parPort,&qypk,sizeof(qypk));
@@ -220,6 +222,7 @@ class Client:public Server{
     netSource buf;
     in_addr   from;
     short     port;
+    liveBegin();
     while(liveclientrunning){
       if(!wait_for_data(1,0))continue;
       bzero(&buf,sizeof(buf));
@@ -227,92 +230,14 @@ class Client:public Server{
         if(from.s_addr==parIP.s_addr && port==parPort){
           if(!ysDB.logunique(buf.header.userid(),buf.header.unique)) continue;
           if(buf.header.mode!=_LIVE)continue;
+          if(config::autoboardcast){
+            live(&buf);
+          }
           if(!callback(&(buf.source),buf.size(),arg))return;
         }
       }
     }
-  }
-  bool updatekey(){
-    netSource qypk;
-    netSource buf;
-    int i;
-    in_addr  from;
-    short    port;
-    bzero(&qypk,sizeof(qypk));
-    bzero(&buf ,sizeof(buf ));
-    Key senddata;
-    senddata.buf=(Key::netSendkey*)&(qypk.source);
-    senddata.initbuf();
-    qypk.header.mode=_UPDATEKEY;
-    qypk.header.userid=myuserid;
-    
-    int rdn=randnum();
-    qypk.header.unique=rdn;
-    
-    qypk.size=sizeof(Key::netSendkey);
-    wristr(mypassword,qypk.header.password);
-    if(iscrypt)crypt_encode(&qypk,&key);
-    for(i=0;i<10;i++){
-      send(parIP,parPort,&qypk,sizeof(qypk));
-      uploop2:
-      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
-        if(from.s_addr==parIP.s_addr && port==parPort){
-          crypt_decode(&buf,&key);
-          
-          if(rdn!=qypk.header.unique) goto uploop2;
-          
-          if(config::checkSign)
-          if(!senddata.checksign())return 0;
-          senddata.computekey((unsigned char*)&buf.source);
-          for(i=0;i<16;i++){
-            this->key.data[i]=senddata.shared[i];
-          }
-          return 1;
-        }
-        else
-          goto uploop2;
-      }
-    }
-    return 0;
-  }
-  bool connectToUser(int32_t uid,in_addr * oaddr,short * oport){
-    netQuery qypk;
-    netQuery buf;
-    int      i;
-    in_addr  from;
-    short    port;
-    bzero(&qypk,sizeof(qypk));
-    bzero(&buf ,sizeof(buf ));
-    qypk.header.mode=_CONNECTUSER;
-    wristr(mypassword,qypk.header.password);
-    
-    int rdn=randnum();
-    qypk.header.unique=rdn;
-    
-    qypk.header.userid=myuserid;
-    qypk.header.globalMode=globalmode;
-    qypk.num1=uid;
-    if(iscrypt)crypt_encode(&qypk,&key);
-    for(i=0;i<10;i++){
-      send(parIP,parPort,&qypk,sizeof(qypk));
-      dsloop1:
-      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
-        if(from.s_addr==parIP.s_addr && port==parPort){
-          crypt_decode(&buf,&key);
-          if(buf.header.mode==_P2PCONNECT){
-            *oport =buf.num1();
-            *oaddr =buf.addr;
-            if(p2pconnect(buf.addr,buf.num1()))
-              return 1;
-            else
-              return 0;
-          }else
-            return 0;
-        }
-        else
-          goto dsloop1;
-      }
-    }
+    liveEnd();
   }
   bool newSrc(const char * sname){
     netQuery qypk;
@@ -610,6 +535,75 @@ class Client:public Server{
       }
     }
   }
-}client(CLIENT_PORT);
+  int callPlus(lua_State * L){
+    netQuery qypk;
+    netQuery buf;
+    int      i;
+    in_addr  from;
+    short    port;
+    
+    char     bufs[17];
+    bufs[16]='\0';
+      
+    bzero(&qypk,sizeof(qypk));
+    bzero(&buf ,sizeof(buf ));
+    qypk.header.mode=_PLUS;
+    wristr(mypassword,qypk.header.password);
+    
+    int rdn=randnum();
+    qypk.header.unique=rdn;
+    
+    qypk.header.userid=myuserid;
+    
+      //从这里可以看出，callPlus的数据包非常小
+      //要传输文件，请直接上传资源，然后用callPlus传资源id
+      if(lua_isstring(L,1))
+        wristr(lua_tostring(L,1),qypk.str1);
+      if(lua_isstring(L,2))
+        wristr(lua_tostring(L,2),qypk.str2);
+      if(lua_isinteger(L,3))
+        qypk.num1=lua_tointeger(L,3);
+      if(lua_isinteger(L,4))
+        qypk.num2=lua_tointeger(L,4);
+      if(lua_isinteger(L,5))
+        qypk.num3=lua_tointeger(L,5);
+      if(lua_isinteger(L,6))
+        qypk.num4=lua_tointeger(L,6);
+      
+    
+    if(iscrypt)crypt_encode(&qypk,&key);
+    for(i=0;i<10;i++){
+      send(parIP,parPort,&qypk,sizeof(qypk));
+      dsloop1:
+      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
+        if(from.s_addr==parIP.s_addr && port==parPort){
+          crypt_decode(&buf,&key);
+          
+          if(rdn!=qypk.header.unique) goto dsloop1;
+          
+          if(buf.header.mode==_PLUS){
+            
+            //push querys
+            wristr(buf.str1, bufs);
+            lua_pushstring(L,bufs);
+            
+            wristr(buf.str2, bufs);
+            lua_pushstring(L,bufs);
+            
+            lua_pushinteger(L,buf.num1());
+            lua_pushinteger(L,buf.num2());
+            lua_pushinteger(L,buf.num3());
+            lua_pushinteger(L,buf.num4());
+        
+            return 6;
+          }else
+            return 0;
+        }
+        else
+          goto dsloop1;
+      }
+    }
+  }
+}client(config::L.yscPort);
 }
 #endif

@@ -12,6 +12,7 @@ extern "C" {
 #include "lua/src/lauxlib.h"
 #include "lua/src/luaconf.h"
 }
+#include "filecache.hpp"
 namespace yrssf{
 class ysConnection:public serverBase{
   public:
@@ -25,14 +26,14 @@ class ysConnection:public serverBase{
   char                 globalmode;
   bool                 iscrypt;
   aesblock             key;
+  char                 parpbk[ECDH_SIZE+1];
+  std::string          parhash;
   ysConnection(short p):serverBase(p){
     mypassword[16]='\0';
     script="default.lua";
   }
   void fileappend(const char * n,char * data,int size){
-    FILE * f=fopen(n,"a");
-    fwrite(data,size,1,f);
-    fclose(f);
+    filecache::fileappend(n,data,size);
   }
   void createfile(const char *n){
     FILE * f=fopen(n,"w");
@@ -125,8 +126,11 @@ class ysConnection:public serverBase{
   virtual bool goLast(){
     location lc;
     iplocker.lock();
-    if(ipstack.empty())
+    if(ipstack.empty()){
+      iplocker.unlock();
       return 0;
+      
+    }
     lc=ipstack.top();
     ipstack.pop();
     parIP=lc.ip;
@@ -141,8 +145,8 @@ class ysConnection:public serverBase{
       ip.s_addr=inet_addr(lua_tostring(L,1));
       if(!lua_isinteger(L,2))return 0;
       short port=lua_tointeger(L,2);
-      if(!lua_isinteger(L,3))return 0;
-      auto self=(ysConnection*)lua_tointeger(L,3);
+      if(!lua_isptr(L,3))return 0;
+      auto self=(ysConnection*)lua_toptr(L,3);
       self->succeed(ip,port,0);
       return 0;
     });
@@ -152,8 +156,8 @@ class ysConnection:public serverBase{
       ip.s_addr=inet_addr(lua_tostring(L,1));
       if(!lua_isinteger(L,2))return 0;
       short port=lua_tointeger(L,2);
-      if(!lua_isinteger(L,3))return 0;
-      auto self=(ysConnection*)lua_tointeger(L,3);
+      if(!lua_isptr(L,3))return 0;
+      auto self=(ysConnection*)lua_toptr(L,3);
       self->fail(ip,port,0);
       return 0;
     });
@@ -163,8 +167,8 @@ class ysConnection:public serverBase{
       ip.s_addr=inet_addr(lua_tostring(L,1));
       if(!lua_isinteger(L,2))return 0;
       short port=lua_tointeger(L,2);
-      if(!lua_isinteger(L,3))return 0;
-      auto self=(ysConnection*)lua_tointeger(L,3);
+      if(!lua_isptr(L,3))return 0;
+      auto self=(ysConnection*)lua_toptr(L,3);
       lua_pushboolean(L,self->p2pconnect(ip,port));
       return 1;
     });
@@ -174,8 +178,8 @@ class ysConnection:public serverBase{
       ip.s_addr=inet_addr(lua_tostring(L,1));
       if(!lua_isinteger(L,2))return 0;
       short port=lua_tointeger(L,2);
-      if(!lua_isinteger(L,3))return 0;
-      auto self=(ysConnection*)lua_tointeger(L,3);
+      if(!lua_isptr(L,3))return 0;
+      auto self=(ysConnection*)lua_toptr(L,3);
       netQuery query;
       bzero(&query,sizeof(query));
       query.header.mode=_PLUS;
@@ -293,18 +297,20 @@ class ysConnection:public serverBase{
     auto query=(netQuery*)data;
     char buffer[17];
     buffer[16]='\0';
-    lua=lua_newthread(gblua);
+    auto Lp=luapool::Create();
+    lua=Lp->L;
     char ipbuf[32];
     inttoip(from,ipbuf);
     lua_pushstring (lua,ipbuf);
     lua_setglobal(lua,"FROM");
     lua_pushinteger(lua,port);
     lua_setglobal(lua,"FROM_PORT");
-    lua_pushinteger(lua,(int)this);
+    lua_pushptr(lua,this);
     lua_setglobal(lua,"RUNNINGSERVER");
     lua_pushinteger(lua,query->header.userid());
     lua_setglobal(lua,"USERID");
     wristr(query->header.function,buffer);
+    buffer[16]='\0';
     lua_pushstring(lua,buffer);
     lua_setglobal(lua,"FUNCTION_NAME");
     lua_pushstring(lua,u->c_str());
@@ -332,7 +338,7 @@ class ysConnection:public serverBase{
     int i;
     const char * ostr;
     
-    lua_getglobal(lua,"str1");
+    lua_getglobal(lua,"STR1");
     if(lua_isstring(lua,-1)){
       ostr=lua_tostring(lua,-1);
       for(i=0;(i<16 && ostr[i]!='\0');i++)
@@ -340,13 +346,14 @@ class ysConnection:public serverBase{
     }
     lua_pop(lua,1);
     
-    lua_getglobal(lua,"str2");
+    lua_getglobal(lua,"STR2");
     if(lua_isstring(lua,-1)){
       ostr=lua_tostring(lua,-1);
       for(i=0;(i<16 && ostr[i]!='\0');i++)
         result->str2[i]=ostr[i];
     }
     lua_pop(lua,1);
+    luapool::Delete(Lp);
   }
   virtual bool run(in_addr from,short port,void * data){
     std::string userinfo;
@@ -570,19 +577,20 @@ class ysConnection:public serverBase{
         filenamer=result.c_str();
         //get file name end
         bzero(&respk,sizeof(respk));
-        ff=fopen(filenamer,"r");
-        fseek(ff,SOURCE_CHUNK_SIZE*query->num1(),SEEK_SET);
-        for(i=0;(i<SOURCE_CHUNK_SIZE && !feof(ff));i++){
-          respk.source[i]=fgetc(ff);
-        }
-        fclose(ff);
+        
+        respk.size=filecache::readfile(
+          filenamer,
+          SOURCE_CHUNK_SIZE*query->num1(),
+          SOURCE_CHUNK_SIZE,
+          respk.source
+        );
+        
         respk.header.userid=myuserid;
         for(i=0;i<16;i++)
           respk.header.password[i]=mypassword[i];
         
         respk.header.unique=header->unique;
         
-        respk.size=i;
         respk.header.mode=_SETSRC_APPEND;
         wristr(query->str1,respk.title);
         if(crypt)crypt_encode(&respk,&key);
@@ -639,7 +647,7 @@ class ysConnection:public serverBase{
             return 0;
           }
         }
-        if(remove(result.c_str())==-1){
+        if(filecache::removefile(result.c_str())==-1){
           fail(from,port,header->unique);
           return 0;
         }
@@ -691,7 +699,7 @@ class ysConnection:public serverBase{
             return 0;
           }
         }else{
-          if(!ysDB.user->Get(leveldb::ReadOptions(),name,&result).ok()){fail(from,port,header->unique);return 0;}
+          if(!ysDB.ldata->Get(leveldb::ReadOptions(),userpre+name,&result).ok()){fail(from,port,header->unique);return 0;}
           if(result.empty()){fail(from,port,header->unique);return 0;}
           tp=result.c_str();
           for(int i=0;i<16;i++){
@@ -790,6 +798,14 @@ class ysConnection:public serverBase{
         
         send(from,port,&respk,sizeof(respk));
       break;
+      case _LIVE_B:
+        ysDB.liveAdd(location(from,port));
+        succeed(from,port,header->unique);
+      break;
+      case _LIVE_E:
+        ysDB.liveRemove(location(from,port));
+        succeed(from,port,header->unique);
+      break;
       case _SUCCEED: break;
       case _FAIL   : break;
     }
@@ -805,6 +821,22 @@ class ysConnection:public serverBase{
 *do something......
 */
     //ysDebug("login");
+    if(!getPbk())return 0;
+    
+    std::string dbkey="safe_key_";
+    dbkey+=parhash;
+    
+    std::string dbv;
+    //检查数据库中是否有aes密码
+    if(ysDB.ldata->Get(leveldb::ReadOptions(),dbkey,&dbv).ok()){
+      if(dbv.empty())goto no_key;//如果没有
+      
+      key.getbase64(dbv.c_str());
+      iscrypt=1;
+      //有，则启动加密
+    }
+    
+    no_key:
     netQuery  qypk;
     netSource buf;
     int      i,rdn;
@@ -903,10 +935,146 @@ class ysConnection:public serverBase{
         respk->header.mode=_LIVE;
         respk->header.crypt='f';
     }
-    for(std::list<location>::iterator it=ysDB.livelist.begin();it!=ysDB.livelist.end();it++){
+    ysDB.livelocker.Rlock();
+    for(auto it=ysDB.livelist.begin();it!=ysDB.livelist.end();it++){
       for(i=0;i<4;i++)
         send(it->ip,it->port,&respk,sizeof(respk));
     }
+    ysDB.livelocker.unlock();
+  }
+  bool connectToUser(int32_t uid,in_addr * oaddr,short * oport){
+    netQuery qypk;
+    netQuery buf;
+    int      i;
+    in_addr  from;
+    short    port;
+    bzero(&qypk,sizeof(qypk));
+    bzero(&buf ,sizeof(buf ));
+    qypk.header.mode=_CONNECTUSER;
+    wristr(mypassword,qypk.header.password);
+    
+    int rdn=randnum();
+    qypk.header.unique=rdn;
+    
+    qypk.header.userid=myuserid;
+    qypk.header.globalMode=globalmode;
+    qypk.num1=uid;
+    if(iscrypt)crypt_encode(&qypk,&key);
+    for(i=0;i<10;i++){
+      send(parIP,parPort,&qypk,sizeof(qypk));
+      dsloop1:
+      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
+        if(from.s_addr==parIP.s_addr && port==parPort){
+          crypt_decode(&buf,&key);
+          if(buf.header.mode==_P2PCONNECT){
+            *oport =buf.num1();
+            *oaddr =buf.addr;
+            if(p2pconnect(buf.addr,buf.num1()))
+              return 1;
+            else
+              return 0;
+          }else
+            return 0;
+        }
+        else
+          goto dsloop1;
+      }
+    }
+  }
+  bool getPbk(){
+    netSource qypk;
+    netSource buf;
+    int i;
+    in_addr  from;
+    short    port;
+    bzero(&qypk,sizeof(qypk));
+    qypk.header.mode=_GET_PUBLIC_KEY;
+    qypk.header.userid=myuserid;
+    int rdn=randnum();
+    qypk.header.unique=rdn;
+    //wristr(mypassword,qypk.header.password);
+    //获取公钥不需要密码
+    if(iscrypt)crypt_encode(&qypk,&key);
+    for(i=0;i<10;i++){
+      send(parIP,parPort,&qypk,sizeof(qypk));
+      dsloop1:
+      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
+        if(from.s_addr==parIP.s_addr && port==parPort){
+          crypt_decode(&buf,&key);
+          
+          if(rdn!=qypk.header.unique) goto dsloop1;
+          
+          if(buf.header.mode==_GET_PUBLIC_KEY){
+            memcpy(
+              parpbk,
+              buf.source,
+              ECDH_SIZE
+            );
+            parpbk[ECDH_SIZE]='\0';
+            limonp::md5String(parpbk,parhash);
+            //别慌，这是公钥，本来就没有保密的必要
+            //所以用md5也无所谓了。
+            //如果确实担心，请把这个换成sha（openssl里面有）
+            return 1;
+          }else{
+            return 0;
+          }
+        }
+        else
+          goto dsloop1;
+      }
+    }
+    return 0;
+  }
+  bool updatekey(){
+    if(!getPbk())return 0;
+    netSource qypk;
+    netSource buf;
+    int i;
+    in_addr  from;
+    short    port;
+    bzero(&qypk,sizeof(qypk));
+    bzero(&buf ,sizeof(buf ));
+    Key senddata;
+    senddata.buf=(Key::netSendkey*)&(qypk.source);
+    senddata.initbuf();
+    qypk.header.mode=_UPDATEKEY;
+    qypk.header.userid=myuserid;
+    
+    int rdn=randnum();
+    qypk.header.unique=rdn;
+    
+    qypk.size=sizeof(Key::netSendkey);
+    wristr(mypassword,qypk.header.password);
+    if(iscrypt)crypt_encode(&qypk,&key);
+    for(i=0;i<10;i++){
+      send(parIP,parPort,&qypk,sizeof(qypk));
+      uploop2:
+      if(recv_within_time(&from,&port,&buf,sizeof(buf),1,0)){
+        if(from.s_addr==parIP.s_addr && port==parPort){
+          crypt_decode(&buf,&key);
+          
+          if(rdn!=qypk.header.unique) goto uploop2;
+          
+          if(config::checkSign)
+          if(!senddata.checksign())return 0;
+          senddata.computekey((unsigned char*)&buf.source);
+          for(i=0;i<16;i++){
+            this->key.data[i] =senddata.shared[i];
+          }
+          //将密码保存至数据库
+          std::string dbkey="safe_key_";
+          dbkey+=parhash;
+          std::string dbpwd=this->key.tobase64();
+          ysDB.ldata->Put(leveldb::WriteOptions(),dbkey,dbpwd);
+          
+          return 1;
+        }
+        else
+          goto uploop2;
+      }
+    }
+    return 0;
   }
 };
 }

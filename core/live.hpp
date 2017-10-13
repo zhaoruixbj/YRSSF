@@ -1,19 +1,18 @@
 #ifndef yrssf_core_live
 #define yrssf_core_live
 #include "client.hpp"
+#include "websocket.hpp"
 #include <sys/file.h>
 #include <linux/fb.h>
 #include <sys/ioctl.h>
 #include <jpeglib.h>
 #include <jerror.h>
 #include <sys/soundcard.h>
+#include <string>
 namespace yrssf{
 int livefifo;
 int liveserverfifo;
-static bool runliveclient_cb(void * data,int size,void*){
-  write(livefifo,data,size>SOURCE_CHUNK_SIZE?SOURCE_CHUNK_SIZE:size);
-  return 1;
-}
+bool runliveclient_cb(void * data,int size,void*);
 static void * runliveclient_th(void *){
   if(clientdisabled)return 0;
   clientdisabled=1;
@@ -110,6 +109,9 @@ namespace videolive{
     }
     void display(){
       if(fd) write(fd,buffer,3584);
+    }
+    void display(void * data){
+      if(fd) write(fd,data,3584);
     }
   };
   struct rgb565{
@@ -260,9 +262,21 @@ namespace videolive{
     float resizex,resizey;
     pixel buffer[600][500];
     struct Updatelog{
-      unsigned int times;
+      unsigned int times,ct;
       Updatelog(){
-        times=0;
+        this->times=0;
+      }
+      bool needsend(){
+        double u=(double)ct;
+        double d=300.0d;
+        if((u/d)>config::livepresent){
+          return 1;
+        }else{
+          return 0;
+        }
+      }
+      void count(){
+        ct++;
       }
     }updatelog[40][25];
     unsigned int times;
@@ -284,8 +298,13 @@ namespace videolive{
         buffer[x][y].R!=px->R ||
         buffer[x][y].G!=px->G ||
         buffer[x][y].B!=px->B
-      )
-        updatelog[x][y].times=this->times;
+      ){
+        if(updatelog[x][y].times!=this->times){
+          updatelog[x][y].times=this->times;
+          updatelog[x][y].ct=0;  //重置计数器
+        }
+        updatelog[x][y].count();
+      }
       buffer[x][y].R=px->R;
       buffer[x][y].G=px->G;
       buffer[x][y].B=px->B;
@@ -363,7 +382,7 @@ namespace videolive{
       }
       for(ix=0;ix<40;ix++)
       for(iy=0;iy<25;iy++){
-        if(updatelog[ix][iy].times==times){
+        if(updatelog[ix][iy].times==times && updatelog[ix][iy].needsend()){
           bufp->m='i';
           bufp->x=ix;
           bufp->y=iy;
@@ -386,9 +405,9 @@ namespace videolive{
     }
   };
   class sound{
+    public:
     unsigned int times;
     Sound soundbuf;
-    public:
     sound(const char * path):soundbuf(path){
       times=0;
     }
@@ -414,9 +433,9 @@ namespace videolive{
     }
   };
   class live_f{
+    public:
     boardcast * bd;
     sound     * sd;
-    public:
     live_f(){
       bd=NULL;
     }
@@ -457,5 +476,58 @@ namespace videolive{
     }
   }screen;
 }
+int livetimer=0;
+bool runliveclient_cb(void * data,int size,void*){
+  auto np=(videolive::netPack*)data;
+  char buf[512];
+  std::string sbuf;
+  if(np->m=='i' || np->m=='w'){
+    if(np->t() > livetimer){
+      livetimer==np->t();
+      snprintf(buf,512,"live %c %8x %8x %8x %8x : ",
+        np->m,
+        np->x(),
+        np->y(),
+        np->w(),
+        np->h()
+      );
+      sbuf=buf;
+      int j=0;
+      for(int jy=0;jy<20;jy++){
+        for(int jx=0;jx<15;jx++){
+          bzero(buf,64);
+          snprintf(buf,64,"%2x,%2x,%2x;",
+            np->data[j].R,
+            np->data[j].G,
+            np->data[j].B
+          );
+          sbuf+=buf;
+          j++;
+        }
+      }
+      websocket::boardcast(sbuf);
+    }
+  }else
+  if(np->m=='s'){
+    auto bufp=(unsigned char *)np->data;
+    sbuf="live s : ";
+    unsigned char bsound[3584*2];
+    base64::encode(
+      bufp,3584,bsound
+    );
+    sbuf+=(char*)bsound;
+    websocket::boardcast(sbuf);
+    if(config::soundputout){
+      if(videolive::screen.sd){
+        videolive::screen.sd->soundbuf.display(bufp);
+      }
+    }
+  }
+  if(config::liveputout){
+    write(livefifo,data,size>SOURCE_CHUNK_SIZE?SOURCE_CHUNK_SIZE:size);
+  }
+  return 1;
+}
+//////////////////////////////////////
 }
 #endif

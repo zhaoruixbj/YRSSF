@@ -1,8 +1,5 @@
 #ifndef yrssf_threadpool
 #define yrssf_threadpool
-#ifndef yrssf_threadpool_size
-  #define yrssf_threadpool_size 16
-#endif
 #include "global.hpp"
 #include <pthread.h>
 #include <unistd.h>
@@ -10,6 +7,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#include <mutex>
 namespace yrssf{
   namespace threadpool{
     typedef struct tpool_work {
@@ -17,6 +15,41 @@ namespace yrssf{
        void                *arg;                    /* 传入任务函数的参数 */
        struct tpool_work   *next;                    
     }tpool_work_t;
+    class tw_pool{
+      tpool_work_t * freed;
+      std::mutex locker;
+      public:
+      tw_pool(){
+        freed=NULL;
+      }
+      ~tw_pool(){
+        tpool_work_t * it1;
+        tpool_work_t * it=freed;
+        while(it){
+          it1=it;
+          it=it->next;
+          delete it1;
+        }
+      }
+      tpool_work_t * get(){
+        locker.lock();
+        if(freed){
+          tpool_work_t * r=freed;
+          freed=freed->next;
+          locker.unlock();
+          return r;
+        }else{
+          locker.unlock();
+          return new tpool_work_t;
+        }
+      }
+      void del(tpool_work_t * f){
+        locker.lock();
+        f->next=freed;
+        freed=f;
+        locker.unlock();
+      }
+    }tpl;
     typedef struct tpool {
        int             shutdown;                    /* 线程池是否销毁 */
        int             max_thr_num;                /* 最大线程数 */
@@ -43,7 +76,8 @@ namespace yrssf{
            pthread_mutex_unlock(&tpool->queue_lock);
     
            work->routine(work->arg);
-           free(work);
+           //free(work);
+           tpl.del(work);
        }
        return NULL;   
     }
@@ -128,7 +162,8 @@ namespace yrssf{
           return -1;
       }
       
-      work = (tpool_work_t*)malloc(sizeof(tpool_work_t));
+      //work = (tpool_work_t*)malloc(sizeof(tpool_work_t));
+      work=tpl.get();
       if (!work) {
           printf("%s:malloc failed\n", __FUNCTION__);
           return -1;
@@ -156,7 +191,7 @@ namespace yrssf{
     class Init{
       public:
       Init(){
-        if (tpool_create(yrssf_threadpool_size) != 0) {
+        if (tpool_create(config::L.tpoolsize) != 0) {
           printf("tpool_create failed\n");
           exit(1);
         }

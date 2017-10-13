@@ -50,6 +50,7 @@ extern "C" {
 #include "scriptqueue.hpp"
 #include "scriptworker.hpp"
 #include "cache.hpp"
+#include "sta.hpp"
 #include "languagesolver.hpp"
 extern "C" int luaopen_cjson(lua_State *l);
 namespace yrssf{
@@ -98,7 +99,7 @@ class API{
   public:
   API(){
     db=NULL;
-    ysDebug("\033[40;43mYRSSF:\033[0mdatabase loading...\n");
+    ysDebug("database loading...\n");
     sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
     int ret = sqlite3_open("./data/yrssf.db", &db);
     if( ret != SQLITE_OK ) {
@@ -112,6 +113,12 @@ class API{
     signal(12,[](int){
       client.liveclientrunning=0;
       clientdisabled=0;
+    });
+    signal(2,[](int){
+      config::stop=1;
+    });
+    signal(SIGPIPE,[](int){
+      //ysDebug("signal:pipe");
     });
     mkdir("./live",0777);
     livefifo=mkfifo("./live/client",0666);
@@ -127,21 +134,54 @@ class API{
     char *ostr;
     const char * res;
     if(!lua_isstring(L,1)) return 0;
+    //ysDebug("p1");
     res=lua_tostring(L,1);
-    ostr=(char*)malloc(strlen(res)+1);
+    int len=strlen(res);
+    ostr=(char*)malloc(len+2);
     int i=0;
-    while(*res){
-      ostr[i]=*res;
-      if(ostr[i]=='/') ostr[i]='.';
-      i++;
+    //ysDebug("p2");
+    for(i=0;i<len;i++){
+      ostr[i]=res[i];
+      if(ostr[i]=='/')ostr[i]='_';
     }
+    //ysDebug("p3");
     ostr[i]='\0';
     lua_pushstring(L,ostr);
+    //ysDebug("p4");
     free(ostr);
     return 1;
   }
   static int sqlfilter(lua_State * L){
-    const static char reps[]={'\'','"','%','\0'};
+    char *bak;
+    if(!lua_isstring(L,1))return 0;
+    const char * str=lua_tostring(L,1);
+    int len;
+    int i;
+    int j;
+    len = strlen(str);
+    bak = (char *)malloc((len * 2 + 1) * sizeof(char));
+    if(bak == NULL){
+        ysDebug("malloc failed\n");
+        return 0;
+    }
+    memset(bak, 0, len * 2 + 1);
+    
+    j = 0;
+    for(i=0; i<len; i++){
+        if((str[i] == '"') || (str[i] == '\'')){
+            bak[j] = str[i];
+            j++;
+        }
+        
+        bak[j] = str[i];
+        j++;
+    }
+    lua_pushstring(L,bak);
+    free(bak);
+    return 1;
+  }
+  static int addslashes(lua_State * L){
+    const static char reps[]={'"','\\','\0'};
     const char * istr;
     char *ostr,*sp2;
     const char * sp;
@@ -298,7 +338,11 @@ class API{
       in_addr addr;
       addr.s_addr=inet_addr(lua_tostring(L,1));
       clientlocker.lock();
-      lua_pushboolean(L,client.changeParentServer(addr,lua_tointeger(L,2)));
+      lua_pushboolean(L,(
+          client.changeParentServer(addr,lua_tointeger(L,2)) &&  
+          server.changeParentServer(addr,lua_tointeger(L,2))
+        )
+      );
       clientlocker.unlock();
       return 1;
   }
@@ -334,7 +378,27 @@ class API{
     short   port;
     if(!lua_isinteger(L,1))return 0;
     clientlocker.lock();
-    lua_pushboolean(L,(client.connectToUser(lua_tointeger(L,1),&addr,&port)));
+    lua_pushboolean(L,(
+        client.connectToUser(lua_tointeger(L,1),&addr,&port)
+      )
+    );
+    clientlocker.unlock();
+    char ipbuf[32];
+    inttoip(addr,ipbuf);
+    lua_pushstring(L,ipbuf);
+    lua_pushinteger(L,port);
+    return 3;
+  }
+  static int lua_becomeNode(lua_State * L){
+    if(clientdisabled)return 0;
+    in_addr addr;
+    short   port;
+    if(!lua_isinteger(L,1))return 0;
+    clientlocker.lock();
+    lua_pushboolean(L,(
+        server.connectToUser(lua_tointeger(L,1),&addr,&port)
+      )
+    );
     clientlocker.unlock();
     char ipbuf[32];
     inttoip(addr,ipbuf);
@@ -374,9 +438,75 @@ class API{
     lua_pushstring(L,str);
     return 1;
   }
+  static int lua_ldata_find(lua_State * L){
+      if(!lua_isstring (L,1))return 0;
+      if(!lua_isinteger(L,2))return 0;
+      if(!lua_isinteger(L,3))return 0;
+      if(!lua_isstring (L,4))return 0;
+      const char * pre=NULL;
+      leveldb::ReadOptions options;
+      //options.snapshot = yrssf::ysDB.ldata->GetSnapshot();
+      leveldb::Iterator* it = yrssf::ysDB.ldata->NewIterator(options);
+      
+      if(strcmp(lua_tostring (L,4),"")!=0){
+        pre=lua_tostring (L,4);
+      }
+      
+      if(strcmp(lua_tostring (L,1),"")==0){
+        it->SeekToFirst();
+      }else{
+        it->Seek(lua_tostring (L,1));
+      }
+      
+      int j=1;
+      lua_newtable(L);//create main array
+      lua_pushnil(L);
+      lua_rawseti(L,-2,0);
+      
+      int from=lua_tointeger(L,2);
+      int lim=from+lua_tointeger(L,3);
+      int i;
+      std::string key,value;
+      bool rded=0;
+      for(i=0; it->Valid(); it->Next()){
+        if(lim>0){
+          if(i>=lim){
+            break;
+          }else{
+            i++;
+          }
+        }
+        if(i<from){
+          continue;
+        }
+        
+        key  =it->key().ToString();
+        value=it->value().ToString();
+        
+        if(pre){
+          if(!prefix_match(pre,key.c_str())){
+            if(rded){
+              break;
+            }else{
+              continue;
+            }
+          }
+        }
+        
+        rded=1;
+        lua_pushstring(L,value.c_str());
+        lua_rawseti(L,-2,j);
+        j++;
+      }
+      
+      delete it;
+      return 1;
+  }
   void funcreg(lua_State * L){
     lua_register(L,"clientUpload",        lua_upload);
+    lua_register(L,"addslashes",          addslashes);
     lua_register(L,"sqlfilter",           sqlfilter);
+    lua_register(L,"pathfilter",          pathfilter);
     lua_register(L,"clientDownload",      lua_download);
     lua_register(L,"clientDel",           lua_del);
     lua_register(L,"clientSetPwd",        lua_setPwd);
@@ -384,6 +514,7 @@ class API{
     lua_register(L,"changeParentServer",  lua_cps);
     lua_register(L,"connectUser",         lua_connectUser);
     lua_register(L,"connectToUser",       lua_connectToUser);
+    lua_register(L,"becomeNode",          lua_becomeNode);
     lua_register(L,"getkey",              lua_getkey);
     lua_register(L,"setkey",              lua_setkey);
     lua_register(L,"runsql",              runsql);
@@ -391,26 +522,78 @@ class API{
     lua_register(L,"cache_set",           cache::set);
     lua_register(L,"cache_delete",        cache::del);
     lua_register(L,"worker",              sworker::create);
-    /*
+    lua_register(L,"serverUpdateKey",[](lua_State * L){
+      for(int i=0;i<16;i++)
+        server.key.data[i]=client.key.data[i];
+      return 0;
+    });
+    lua_register(L,"getParentHash",[](lua_State * L){
+      lua_pushstring(L,client.parhash.c_str());
+      return 1;
+    });
     lua_register(L,"gethostbyname",[](lua_State * L){
       if(!lua_isstring(L,1)) return 0;
       static std::mutex lk;
+      char str[32];
       lk.lock();
-      lua_pushstring(L,
-        inet_ntcp(
-          gethostbyname(lua_tostring(L,1))->h_addr_list
-        )
-      );
+      auto ht=gethostbyname(lua_tostring(L,1));
+      const char * p=*(ht->h_addr_list);
+      if(p){
+        lua_pushstring(L,
+          inet_ntop(
+            ht->h_addrtype,p,str,sizeof(str)
+          )
+        );
+      }else{
+        lua_pushnil(L);
+      }
       lk.unlock();
       return 1;
     });
-    */
+    lua_register(L,"goLastServer",[](lua_State * L){
+      if(clientdisabled)return 0;
+      clientlocker.lock();
+      client.goLast();
+      clientlocker.unlock();
+      return 0;
+    });
+    lua_register(L,"clientLogin",[](lua_State * L){
+      if(clientdisabled)return 0;
+      clientlocker.lock();
+      client.login();
+      clientlocker.unlock();
+      return 0;
+    });
     lua_register(L,"nodeModeOn",[](lua_State * L){
       config::nodemode=1;
       return 0;
     });
     lua_register(L,"nodeModeOff",[](lua_State * L){
       config::nodemode=0;
+      return 0;
+    });
+    lua_register(L,"autoboardcastModeOn",[](lua_State * L){
+      config::autoboardcast=1;
+      return 0;
+    });
+    lua_register(L,"autoboardcastModeOff",[](lua_State * L){
+      config::autoboardcast=0;
+      return 0;
+    });
+    lua_register(L,"liveputoutModeOn",[](lua_State * L){
+      config::liveputout=1;
+      return 0;
+    });
+    lua_register(L,"liveputoutModeOff",[](lua_State * L){
+      config::liveputout=0;
+      return 0;
+    });
+    lua_register(L,"soundOn",[](lua_State * L){
+      config::soundputout=1;
+      return 0;
+    });
+    lua_register(L,"soundOff",[](lua_State * L){
+      config::soundputout=0;
       return 0;
     });
     lua_register(L,"GLOBAL_read",[](lua_State * L){
@@ -421,6 +604,33 @@ class API{
     });
     lua_register(L,"GLOBAL_delete",[](lua_State * L){
       return lglobal.del(L);
+    });
+    lua_register(L,"LDATA_find",lua_ldata_find);
+    lua_register(L,"LDATA_read",[](lua_State * L){
+      if(!lua_isstring(L,1))return 0;
+      std::string src;
+      ysDB.ldata->Get(leveldb::ReadOptions(),
+        lua_tostring(L,1),
+        &src
+      );
+      lua_pushstring(L,src.c_str());
+      return 1;
+    });
+    lua_register(L,"LDATA_set",[](lua_State * L){
+      if(!lua_isstring(L,1))return 0;
+      if(!lua_isstring(L,2))return 0;
+      lua_pushboolean(L,ysDB.ldata->Put(leveldb::WriteOptions(),
+        lua_tostring(L,1),
+        lua_tostring(L,2)
+      ).ok());
+      return 1;
+    });
+    lua_register(L,"LDATA_delete",[](lua_State * L){
+      if(!lua_isstring(L,1))return 0;
+      lua_pushboolean(L,ysDB.ldata->Delete(leveldb::WriteOptions(),
+        lua_tostring(L,1)
+      ).ok());
+      return 1;
     });
     lua_register(L,"hex2num",[](lua_State * L){
       if(!lua_isstring(L,1)) return 0;
@@ -583,10 +793,12 @@ class API{
     });
     lua_register(L,"cryptModeOn",[](lua_State * L){
       client.iscrypt=1;
+      server.iscrypt=1;
       return 0;
     });
     lua_register(L,"cryptModeOff",[](lua_State * L){
       client.iscrypt=0;
+      server.iscrypt=0;
       return 0;
     });
     lua_register(L,"liveadd",[](lua_State * L){
@@ -613,13 +825,36 @@ class API{
       clientdisabled=0;
       return 0;
     });
+    lua_register(L,"callPlus",[](lua_State * L){
+      if(clientdisabled)return 0;
+      clientlocker.lock();
+      int res=client.callPlus(L);
+      clientlocker.unlock();
+      return res;
+    });
     lua_register(L,"setServerUser",lua_ssu);
     lua_register(L,"setClientUser",lua_scu);
     luaopen_cjson(L);
     langsolver::luaopen(L);
+    httpd::luaopen(L);
+    sta::luaopen(L);
     luaopen_ysfunc(L);
   }
 }api;
+static void luaopen_yrssf_std(lua_State * L){
+  char sbuffer[PATH_MAX];
+  getcwd(sbuffer,PATH_MAX);
+    luaL_openlibs      (L);
+    lua_pushptr        (L,&server);
+    lua_setglobal      (L,"SERVER");
+    lua_pushptr        (L,&client);
+    lua_setglobal      (L,"CLIENT");
+    lua_pushstring     (L,sbuffer);
+    lua_setglobal      (L,"APP_PATH");
+  ysConnection::funcreg(L);
+  api.funcreg(L);
+  
+}
 class Init{
   public:
   static void* runServerThread(void*){
@@ -627,39 +862,29 @@ class Init{
   }
   void run(){
     pthread_t newthread;
-    ysDebug("\033[40;43mYRSSF:\033[0m");
     ysDebug("\033[40;36mYRSSF create thread\033[0m\n");
     if(pthread_create(&newthread,NULL,runServerThread,NULL)!=0)
       perror("pthread_create");
   }
   Init(){
+    luapool::reg.push_back(luaopen_yrssf_std);
     pthread_t newthread;
-    char sbuffer[PATH_MAX];
-    getcwd(sbuffer,PATH_MAX);
     if(pthread_create(&newthread,NULL,liveserver,NULL)!=0)
       perror("pthread_create");
-    ysDebug("\033[40;43mYRSSF:\033[0m\033[40;36mYRSSF init\033[0m\n");
-    gblua=luaL_newstate();
-    luaL_openlibs(gblua);
-    lua_pushinteger(gblua,(int)&server);
-    lua_setglobal(gblua,"_SERVER");
-    lua_pushinteger(gblua,(int)&client);
-    lua_setglobal(gblua,"_CLIENT");
-    lua_pushstring(gblua,sbuffer);
-    lua_setglobal(gblua,"APP_PATH");
-    ysConnection::funcreg(gblua);
-    api.funcreg(gblua);
+    ysDebug("\033[40;36mYRSSF init\033[0m\n");
     scriptqueuerun();
-    luaL_dofile(gblua,"init.lua");
-    if(lua_isstring(gblua,-1)){
-      std::cout<<lua_tostring(gblua,-1)<<std::endl;
+    auto Lp=luapool::Create();
+    auto L=Lp->L;
+    luaL_dofile(L,"init.lua");
+    if(lua_isstring(L,-1)){
+      std::cout<<lua_tostring(L,-1)<<std::endl;
     }
+    luapool::Delete(Lp);
   }
   ~Init(){
-    ysDebug("\033[40;43mYRSSF:\033[0m\033[40;36mYRSSF server shutdown\033[0m\n");
+    ysDebug("\033[40;36mYRSSF server shutdown\033[0m\n");
     server.shutdown();
     scriptqueue.stop();
-    lua_close(gblua);
   }
 }init;
 ///////////////////////////
@@ -683,10 +908,6 @@ extern "C" void loadAPI(lua_State * L){
 extern "C" int luaopen_yrssf(lua_State * L){
     loadAPI(L);
     return 1;
-}
-extern "C" void dofile(const char * path){
-    lua_State * L=lua_newthread(yrssf::gblua);
-    luaL_dofile(L,path);
 }
 int main(){
     ysDebug("init...");
@@ -749,6 +970,7 @@ class Automanager{
   public:
   Automanager(){
     pthread_t newthread;
+    ysDebug("init");
     if(pthread_create(&newthread,NULL,freeunique,NULL)!=0)
       perror("pthread_create");
     if(pthread_create(&newthread,NULL,freemems,NULL)!=0)
